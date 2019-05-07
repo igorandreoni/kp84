@@ -4,6 +4,7 @@ import os, sys
 import glob
 import optparse
 import requests
+import json
 
 import numpy as np
 import h5py
@@ -24,6 +25,7 @@ from penquins import Kowalski
 
 import urllib
 import pandas as pd
+import pdb
 
 def parse_commandline():
     """
@@ -54,7 +56,8 @@ def parse_commandline():
 
     parser.add_option("--doPlots",  action="store_true", default=False)
     parser.add_option("--doVerbose",  action="store_true", default=False)
-
+    parser.add_option("--doAnnotate",  action="store_true", default=False)
+    
     opts, args = parser.parse_args()
 
     return opts
@@ -434,6 +437,65 @@ def galex_query(ra_deg, dec_deg, rad_deg, maxmag=24,
     except:
         return []
 
+
+
+def get_programidx(program_name, username, password):
+    ''' Given a program name, it returns the programidx '''
+
+    r = requests.post('http://skipper.caltech.edu:8080/cgi-bin/growth/list_programs.cgi', auth=(username, password))
+    programs=json.loads(r.text)
+    program_dict={p['name']:p['programidx'] for i,p in enumerate(programs)}
+
+    try:
+        return program_dict[program_name]
+    except KeyError:
+        print(f'The user {username} does not have access to the program {program_name}')
+        return None
+
+def get_candidates_growth_marshal(program_name, username, password):
+    ''' Query the GROWTH db for the science programs '''
+
+    programidx=get_programidx(program_name, username, password)
+    if programidx==None:
+        return None
+    r = requests.post('http://skipper.caltech.edu:8080/cgi-bin/growth/list_program_sources.cgi', auth=(username, password), data={'programidx':str(programidx)})
+    sources=json.loads(r.text)
+
+    return sources
+
+def get_source_autoannotations(sourceid, username, password):
+    ''' Fetch a specific source's autoannotations from the GROWTH marshal. '''
+    r = requests.post('http://skipper.caltech.edu:8080/cgi-bin/growth/source_summary.cgi', auth=(username, password), data={'sourceid':str(sourceid)
+}) 
+    summary=json.loads(r.text)
+    autoannotations=summary['autoannotations']
+
+    return autoannotations
+
+def add_autoannotations(name_source, username, password):
+    ''' Check if the source is present on the GROWTH marshal and,
+    if so, add autoannotations '''
+    program_name = 'Electromagnetic Counterparts to Gravitational Waves'
+    sources = get_candidates_growth_marshal(program_name, username, password)
+    id_source=None
+    for s, i in zip(sources, np.arange(len(sources))):
+        if s['name'] == name_source:
+            id_source = s['id']
+            break
+        else:
+            continue
+
+    autoannotations=get_source_autoannotations(s["id"], username, password)
+#    r = requests.post('http://skipper.caltech.edu:8080/cgi-bin/growth/add_autoannotation.cgi', auth=(username, password), \
+    data={'id': -1, 'datatype': 'STRING','action': 'commit', 'sourceid':str(id_source), 'type': 'info', 'comment': 'Slow evolution'})
+#    for auto in autoannotations:
+#        autoannotations_string = f"{autoannotations_string}; \n {auto['username']}, {auto['type']}, {auto['comment']}" 
+
+    
+#    pdb.set_trace()
+
+    return
+
 # To-Dos:
 # Easy / Short-term:
 # Implement real WISE color cuts: https://ui.adsabs.harvard.edu/abs/2015ApJS..221...12S/abstract
@@ -515,7 +577,7 @@ else:
 # QSO Ellipse
 ellipse = patches.Ellipse((3.0, 1.25), 1.0, 0.5, 70)
 
-for ra, dec in zip(ras, decs):
+for ra, dec in zip([ras], [decs]):
     coord = SkyCoord(ra * u.deg, dec * u.deg)
     gc = coord.transform_to('galactic')
     sep = coord.separation(galaxy_coords).deg
@@ -526,19 +588,20 @@ for ra, dec in zip(ras, decs):
                                    "cone_search_unit": "arcsec" },
            "catalogs": { "ZTF_alerts": { "filter": "{}", "projection": "{}" } } }
     r = kow.query(query=qu)
-    
+
     if not "result_data" in r:
         print("Query failed for %.5f, %.5f continuing..." % (ra, dec))
     
     key = list(r["result_data"].keys())[0]
     data = r["result_data"][key]
-    
+
     for key in data.keys():
         data_tmp = data[key]
         if len(data_tmp) == 0:
             continue
         ztf_name = data_tmp[0]["_id"]
-    
+        ztf_id = data_tmp[0]["candid"]
+
     mags = {}
     bands = {1: 'g', 2: 'r', 3: 'i'}
     for key in bands.keys():
@@ -586,7 +649,7 @@ for ra, dec in zip(ras, decs):
                 peakdeltsig = np.sqrt(photometry[-1,1]**2 + photometry[0,1]**2)
 
     ztf_name = ztf_name.split("_")[1]
-    
+
     ps1 = ps1_query(ra, dec, 5/3600.0)
     ps1_lightcurve = ps1_dr2_query(ra, dec, 2/3600.0)
 
@@ -630,7 +693,7 @@ for ra, dec in zip(ras, decs):
             name = "NA"
     except:
         name = "NA"
-    
+
     notes = []
     if gc.b.deg < 15:
         notes.append('[lowb]')
@@ -658,7 +721,7 @@ for ra, dec in zip(ras, decs):
         notes.append('[hostless]')
     if stellar:
         notes.append('[stellar]')
-    
+
     if (np.min(sep)*3600.0) < 10:
         notes.append('[distance: %.1f Mpc]' % distmpc[np.argmin(sep)])
     
@@ -702,7 +765,12 @@ for ra, dec in zip(ras, decs):
                                                         peakmag,
                                                         peaksig,
                                                         " ".join(notes)))
-    
+
+    if opts.doAnnotate:
+        ''' Add autoannotation on the GROWTH marshal'''
+        add_autoannotations(ztf_name, opts.skipper_user, opts.skipper_pwd)
+
+
     if opts.doVerbose:
         print('ZTF name: %s' % ztf_name)
         print('Peak magnitude (%s): %.1f +- %.1f' % (peakfilt,
